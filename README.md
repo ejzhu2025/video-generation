@@ -1,5 +1,5 @@
 ---
-title: Tongsui Video Agent
+title: Video Generation
 emoji: 🎬
 colorFrom: indigo
 colorTo: sky
@@ -7,7 +7,7 @@ sdk: docker
 pinned: false
 ---
 
-# Tongsui Video Agent
+# Video Generation
 
 AI-powered ad video generator with two modes:
 
