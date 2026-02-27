@@ -695,8 +695,72 @@ async def create_storyboard(req: StoryboardRequest):
 async def suggest_motion(req: SuggestMotionRequest):
     try:
         result = await generate_ad_script(req.photo_url, req.brand_name or "", req.platform)
-        # result = {"concept": "...", "motion_prompt": "..."}
         return result
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+# ── T2I (Text → Image) ───────────────────────────────────────
+
+class GenerateImageRequest(BaseModel):
+    brief: str
+    brand_name: str = "the brand"
+    platform: str = "instagram_reel"
+
+async def _t2i_image_prompt(brief: str, brand_name: str, platform: str) -> str:
+    """Ask Claude Haiku to write a FLUX-optimised image prompt."""
+    if not ANTHROPIC_API_KEY:
+        return (f"Professional product photography of {brand_name}, "
+                "clean studio background, cinematic lighting, commercial advertisement style, "
+                "9:16 portrait, photorealistic, high quality")
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    msg = client.messages.create(
+        model="claude-haiku-4-5-20251001", max_tokens=120,
+        messages=[{"role":"user","content":
+            f"Write a FLUX image generation prompt (max 60 words) for a {platform} commercial ad.\n"
+            f"Brand: {brand_name}\nBrief: {brief}\n"
+            f"Requirements: portrait 9:16, photorealistic hero product shot, cinematic lighting, "
+            f"high detail, commercial quality.\n"
+            f"Output the prompt only, no explanation, no quotes."}],
+    )
+    return msg.content[0].text.strip()
+
+async def _generate_t2i(prompt: str) -> str:
+    """Generate image via fal.ai FLUX schnell. Returns CDN image URL."""
+    job = await _fal_submit("fal-ai/flux/schnell", {
+        "prompt": prompt,
+        "image_size": {"width": 720, "height": 1280},
+        "num_inference_steps": 4,
+        "num_images": 1,
+        "output_format": "jpeg",
+    })
+    for _ in range(30):
+        await asyncio.sleep(2)
+        async with httpx.AsyncClient(timeout=20) as hc:
+            sr = await hc.get(job["status_url"], headers={"Authorization": f"Key {FAL_API_KEY}"})
+            data = sr.json()
+        st = data.get("status", "")
+        if st == "COMPLETED":
+            out = data.get("output") or {}
+            imgs = out.get("images") or []
+            if imgs:
+                return imgs[0]["url"]
+            async with httpx.AsyncClient(timeout=20) as hc:
+                rr = await hc.get(job["response_url"], headers={"Authorization": f"Key {FAL_API_KEY}"})
+                out = rr.json()
+            imgs = out.get("images") or []
+            if imgs:
+                return imgs[0]["url"]
+            raise RuntimeError(f"No images in FLUX response: {out}")
+        if st in ("FAILED", "ERROR"):
+            raise RuntimeError(f"FLUX generation failed: {data.get('error','unknown')}")
+    raise RuntimeError("FLUX image generation timed out")
+
+@app.post("/api/generate-image")
+async def api_generate_image(req: GenerateImageRequest):
+    try:
+        prompt    = await _t2i_image_prompt(req.brief, req.brand_name, req.platform)
+        image_url = await _generate_t2i(prompt)
+        return {"image_url": image_url, "image_prompt": prompt}
     except Exception as e:
         raise HTTPException(500, str(e))
 
@@ -773,8 +837,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       </div>
       <div class="flex items-center gap-3">
         <!-- Mode badge -->
-        <span x-show="mode==='t2v'" class="px-2.5 py-1 bg-indigo-100 text-indigo-700 text-xs font-semibold rounded-full">📝 Text → Video</span>
-        <span x-show="mode==='i2v'" class="px-2.5 py-1 bg-sky-100 text-sky-700 text-xs font-semibold rounded-full">🖼 Image → Video</span>
+        <span x-show="mode==='t2v'"   class="px-2.5 py-1 bg-indigo-100 text-indigo-700 text-xs font-semibold rounded-full">📝 Text → Video</span>
+        <span x-show="mode==='i2v'"   class="px-2.5 py-1 bg-sky-100 text-sky-700 text-xs font-semibold rounded-full">🖼 Image → Video</span>
+        <span x-show="mode==='t2i2v'" class="px-2.5 py-1 bg-violet-100 text-violet-700 text-xs font-semibold rounded-full">✨ Brief → Image → Video</span>
         <button @click="reset()" class="text-xs text-slate-400 hover:text-slate-600 px-3 py-1.5 rounded-lg hover:bg-slate-100 transition-colors">
           ↺ <span x-text="mode ? 'Change Mode' : 'Reset'"></span>
         </button>
@@ -814,6 +879,21 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         </div>
       </template>
     </div>
+    <!-- T2I2V: 3 steps -->
+    <div x-show="mode==='t2i2v'" class="flex items-center">
+      <template x-for="(s,i) in ['Brief','AI Image','Video']" :key="i">
+        <div class="flex items-center flex-1">
+          <div class="flex flex-col items-center gap-1 shrink-0">
+            <div :class="step>i+1?'bg-violet-500 text-white':step===i+1?'bg-violet-500 text-white':'bg-slate-200 text-slate-400'"
+                 class="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold transition-all">
+              <span x-show="step>i+1">✓</span><span x-show="step<=i+1" x-text="i+1"></span>
+            </div>
+            <span :class="step>=i+1?'text-violet-600':'text-slate-400'" class="text-xs font-medium" x-text="s"></span>
+          </div>
+          <div x-show="i<2" :class="step>i+1?'bg-violet-400':'bg-slate-200'" class="flex-1 h-0.5 mx-1 mb-5 transition-all"></div>
+        </div>
+      </template>
+    </div>
   </div>
 
   <!-- ══ MAIN CONTENT ══════════════════════════════════ -->
@@ -834,42 +914,59 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         <p class="text-slate-500 mt-2">Choose your creation mode</p>
       </div>
 
-      <div class="grid grid-cols-2 gap-6">
+      <div class="grid grid-cols-3 gap-4">
 
         <!-- T2V Card -->
         <div @click="selectMode('t2v')"
-             class="mcard bg-white rounded-2xl p-6 border-2 border-slate-200 hover:border-indigo-400 shadow-sm">
-          <div class="text-4xl mb-4">📝</div>
-          <h3 class="text-lg font-bold text-slate-800">Text → Video</h3>
-          <p class="text-slate-500 text-sm mt-2 leading-relaxed">
-            Start from a brief or brand URL. Claude writes the storyboard and picks visual style from your photos.
+             class="mcard bg-white rounded-2xl p-5 border-2 border-slate-200 hover:border-indigo-400 shadow-sm">
+          <div class="text-3xl mb-3">📝</div>
+          <h3 class="text-base font-bold text-slate-800">Text → Video</h3>
+          <p class="text-slate-500 text-xs mt-2 leading-relaxed">
+            Brand URL + brief. Claude writes the storyboard and picks visual style.
           </p>
-          <ul class="mt-4 space-y-1.5 text-sm text-slate-400">
-            <li class="flex items-center gap-2"><span class="text-indigo-500">✓</span> URL scraping + brand extraction</li>
-            <li class="flex items-center gap-2"><span class="text-indigo-500">✓</span> AI storyboard with scenes</li>
-            <li class="flex items-center gap-2"><span class="text-indigo-500">✓</span> Auto-detected visual style</li>
-            <li class="flex items-center gap-2"><span class="text-indigo-500">✓</span> Multi-scene narrative</li>
+          <ul class="mt-3 space-y-1 text-xs text-slate-400">
+            <li class="flex items-center gap-1.5"><span class="text-indigo-500">✓</span> URL scraping</li>
+            <li class="flex items-center gap-1.5"><span class="text-indigo-500">✓</span> AI storyboard</li>
+            <li class="flex items-center gap-1.5"><span class="text-indigo-500">✓</span> Multi-scene narrative</li>
           </ul>
-          <div class="mt-6 w-full py-3 bg-indigo-500 hover:bg-indigo-600 text-white rounded-xl text-sm font-semibold text-center transition-colors">
+          <div class="mt-5 w-full py-2.5 bg-indigo-500 hover:bg-indigo-600 text-white rounded-xl text-sm font-semibold text-center transition-colors">
             Start →
           </div>
         </div>
 
         <!-- I2V Card -->
         <div @click="selectMode('i2v')"
-             class="mcard bg-white rounded-2xl p-6 border-2 border-slate-200 hover:border-sky-400 shadow-sm">
-          <div class="text-4xl mb-4">🖼</div>
-          <h3 class="text-lg font-bold text-slate-800">Image → Video</h3>
-          <p class="text-slate-500 text-sm mt-2 leading-relaxed">
-            Upload your product photo and animate it directly. Your actual product appears in the video.
+             class="mcard bg-white rounded-2xl p-5 border-2 border-slate-200 hover:border-sky-400 shadow-sm">
+          <div class="text-3xl mb-3">🖼</div>
+          <h3 class="text-base font-bold text-slate-800">Image → Video</h3>
+          <p class="text-slate-500 text-xs mt-2 leading-relaxed">
+            Upload your product photo and animate it with AI motion.
           </p>
-          <ul class="mt-4 space-y-1.5 text-sm text-slate-400">
-            <li class="flex items-center gap-2"><span class="text-sky-500">✓</span> Your exact product image</li>
-            <li class="flex items-center gap-2"><span class="text-sky-500">✓</span> AI motion prompt suggestions</li>
-            <li class="flex items-center gap-2"><span class="text-sky-500">✓</span> 3 steps, faster workflow</li>
-            <li class="flex items-center gap-2"><span class="text-sky-500">✓</span> Highest brand consistency</li>
+          <ul class="mt-3 space-y-1 text-xs text-slate-400">
+            <li class="flex items-center gap-1.5"><span class="text-sky-500">✓</span> Real product image</li>
+            <li class="flex items-center gap-1.5"><span class="text-sky-500">✓</span> AI motion prompts</li>
+            <li class="flex items-center gap-1.5"><span class="text-sky-500">✓</span> Brand consistency</li>
           </ul>
-          <div class="mt-6 w-full py-3 bg-sky-500 hover:bg-sky-600 text-white rounded-xl text-sm font-semibold text-center transition-colors">
+          <div class="mt-5 w-full py-2.5 bg-sky-500 hover:bg-sky-600 text-white rounded-xl text-sm font-semibold text-center transition-colors">
+            Start →
+          </div>
+        </div>
+
+        <!-- T2I2V Card -->
+        <div @click="selectMode('t2i2v')"
+             class="mcard bg-white rounded-2xl p-5 border-2 border-slate-200 hover:border-violet-400 shadow-sm relative overflow-hidden">
+          <div class="absolute top-2 right-2 px-1.5 py-0.5 bg-violet-500 text-white text-xs rounded-full font-semibold">NEW</div>
+          <div class="text-3xl mb-3">✨</div>
+          <h3 class="text-base font-bold text-slate-800">Brief → Image → Video</h3>
+          <p class="text-slate-500 text-xs mt-2 leading-relaxed">
+            Text only. AI generates a product image first, then animates it.
+          </p>
+          <ul class="mt-3 space-y-1 text-xs text-slate-400">
+            <li class="flex items-center gap-1.5"><span class="text-violet-500">✓</span> No photo needed</li>
+            <li class="flex items-center gap-1.5"><span class="text-violet-500">✓</span> FLUX image generation</li>
+            <li class="flex items-center gap-1.5"><span class="text-violet-500">✓</span> Full AI pipeline</li>
+          </ul>
+          <div class="mt-5 w-full py-2.5 bg-violet-500 hover:bg-violet-600 text-white rounded-xl text-sm font-semibold text-center transition-colors">
             Start →
           </div>
         </div>
@@ -878,9 +975,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
       <div class="bg-slate-50 rounded-xl p-4 border border-slate-200 text-center">
         <p class="text-xs text-slate-500">
-          <strong>Text→Video</strong> generates entirely new visuals from your prompt.
-          &nbsp;·&nbsp;
-          <strong>Image→Video</strong> animates your actual photo — higher brand fidelity.
+          <strong>Text→Video</strong> generates new visuals from your brief &nbsp;·&nbsp;
+          <strong>Image→Video</strong> animates your real photo &nbsp;·&nbsp;
+          <strong>Brief→Image→Video</strong> full AI chain, no upload needed
         </p>
       </div>
     </div>
@@ -1361,6 +1458,185 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       </div>
     </div>
 
+    <!-- ╔══════════════════════════════════════════════╗ -->
+    <!-- ║  T2I2V STEPS                                 ║ -->
+    <!-- ╚══════════════════════════════════════════════╝ -->
+
+    <!-- T2I2V Step 1 — Brief -->
+    <div x-show="mode==='t2i2v' && step===1" class="space-y-5 pt-2">
+      <div class="text-center py-4">
+        <h2 class="text-2xl font-bold text-slate-800">Describe your product & ad</h2>
+        <p class="text-slate-500 mt-1 text-sm">AI will generate a product image, then animate it into a video</p>
+      </div>
+      <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
+        <div>
+          <label class="text-xs font-semibold text-slate-500 uppercase tracking-wider">Brand / Product name</label>
+          <input x-model="brandName" type="text" placeholder="e.g. Nike, Apple, Tong Sui..."
+                 class="mt-1 w-full px-4 py-2.5 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-violet-300"/>
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-slate-500 uppercase tracking-wider">What should this video say?</label>
+          <textarea x-model="brief" rows="4"
+                    placeholder="e.g. 'A luxurious coconut drink in a tropical setting. Warm golden light, fresh ingredients around it. Feeling of indulgence and natural goodness.'"
+                    class="mt-1 w-full p-4 border border-slate-200 rounded-xl text-slate-700 placeholder-slate-300 focus:outline-none focus:ring-2 focus:ring-violet-300 resize-none text-sm leading-relaxed">
+          </textarea>
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-slate-500 uppercase tracking-wider">Platform</label>
+          <div class="mt-1 flex gap-5">
+            <label class="flex items-center gap-2 cursor-pointer text-sm text-slate-600">
+              <input type="radio" x-model="platform" value="instagram_reel" class="accent-violet-500"> 📱 Instagram Reel
+            </label>
+            <label class="flex items-center gap-2 cursor-pointer text-sm text-slate-600">
+              <input type="radio" x-model="platform" value="tiktok" class="accent-violet-500"> 🎵 TikTok
+            </label>
+            <label class="flex items-center gap-2 cursor-pointer text-sm text-slate-600">
+              <input type="radio" x-model="platform" value="youtube" class="accent-violet-500"> ▶️ YouTube Short
+            </label>
+          </div>
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-slate-500 uppercase tracking-wider">Video Duration</label>
+          <div class="grid grid-cols-2 gap-3 mt-1">
+            <template x-for="d in [5,10]" :key="d">
+              <div @click="videoDuration=d"
+                   :class="videoDuration===d?'border-violet-500 bg-violet-50':'border-slate-200 hover:border-violet-300 bg-white'"
+                   class="cursor-pointer border-2 rounded-xl p-3 text-center transition-all">
+                <p class="text-sm font-bold text-slate-800" x-text="d+'s'"></p>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+      <div class="flex justify-between">
+        <button @click="reset()" class="px-5 py-3 text-slate-400 hover:text-slate-600 text-sm">← Change Mode</button>
+        <button @click="startT2IGeneration()" :disabled="!brief.trim()||generatingImage"
+                :class="brief.trim()&&!generatingImage?'bg-violet-500 hover:bg-violet-600 text-white':'bg-slate-200 text-slate-400 cursor-not-allowed'"
+                class="px-7 py-3 rounded-xl font-semibold text-sm flex items-center gap-2">
+          <span x-show="generatingImage" class="spin">↻</span>
+          <span x-text="generatingImage?'Generating image...':'Generate Image →'"></span>
+        </button>
+      </div>
+    </div>
+
+    <!-- T2I2V Step 2 — AI Image + Motion Prompt -->
+    <div x-show="mode==='t2i2v' && step===2" class="space-y-5 pt-2">
+      <div class="text-center py-4">
+        <h2 class="text-2xl font-bold text-slate-800">Your AI-generated image</h2>
+        <p class="text-slate-500 mt-1 text-sm">Claude used your brief to generate this product image with FLUX</p>
+      </div>
+
+      <div class="bg-white rounded-2xl border border-slate-200 shadow-sm p-5 space-y-4">
+        <!-- Generated image preview -->
+        <div class="flex gap-4">
+          <img :src="t2iImageUrl" class="w-32 rounded-xl object-cover shadow-sm shrink-0" style="aspect-ratio:9/16"/>
+          <div class="flex-1 space-y-3">
+            <div>
+              <p class="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1">Image Prompt Used</p>
+              <p class="text-xs text-slate-500 leading-relaxed italic" x-text="t2iImagePrompt"></p>
+            </div>
+            <button @click="startT2IGeneration()" :disabled="generatingImage"
+                    class="flex items-center gap-1.5 px-3 py-1.5 bg-violet-50 hover:bg-violet-100 text-violet-600 text-xs font-medium rounded-lg border border-violet-200 transition-colors disabled:opacity-50">
+              <span x-show="generatingImage" class="spin">↻</span>
+              <span x-text="generatingImage?'Regenerating...':'↺ Regenerate image'"></span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Brand Concept -->
+        <div x-show="adConcept" x-cloak class="rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+          <p class="text-xs font-semibold text-emerald-600 uppercase tracking-wider mb-2">✦ Brand Concept</p>
+          <p class="text-sm text-emerald-900 leading-relaxed" x-text="adConcept"></p>
+        </div>
+
+        <!-- Motion Prompt -->
+        <div>
+          <div class="flex items-center justify-between mb-1">
+            <label class="text-xs font-semibold text-slate-500 uppercase tracking-wider">
+              Motion Prompt <span class="text-slate-400 font-normal normal-case">— sent to video AI</span>
+            </label>
+            <button @click="autoSuggestMotionFromUrl(t2iImageUrl)" :disabled="suggestingMotion"
+                    class="flex items-center gap-1.5 px-3 py-1 bg-violet-50 hover:bg-violet-100 text-violet-600 text-xs font-medium rounded-lg border border-violet-200 transition-colors disabled:opacity-50">
+              <span x-show="suggestingMotion" class="spin">↻</span>
+              <span x-text="suggestingMotion?'Generating...':'↺ Regenerate prompt'"></span>
+            </button>
+          </div>
+          <div x-show="suggestingMotion" x-cloak
+               class="flex items-center gap-2 px-4 py-3 bg-violet-50 border border-violet-200 rounded-xl text-sm text-violet-700 mb-2">
+            <span class="spin">↻</span> Analyzing generated image...
+          </div>
+          <textarea x-model="motionPrompt" rows="3" :disabled="suggestingMotion"
+                    placeholder="e.g. 'Slow cinematic zoom in. Warm golden light sweeps left to right. Steam rises softly.'"
+                    class="w-full p-4 border border-slate-200 rounded-xl text-slate-700 placeholder-slate-300 focus:outline-none focus:ring-2 focus:ring-violet-300 resize-none text-sm leading-relaxed disabled:opacity-50 disabled:bg-slate-50">
+          </textarea>
+        </div>
+
+        <!-- I2V Model selector -->
+        <div class="space-y-2">
+          <p class="text-xs text-slate-500 font-semibold uppercase tracking-wider">Video Model</p>
+          <div class="grid grid-cols-2 gap-2">
+            <template x-for="m in i2vModels" :key="m.id">
+              <div @click="selectedI2VModel=m.id"
+                   :class="selectedI2VModel===m.id?'border-violet-500 bg-violet-50':'border-slate-200 hover:border-violet-300 bg-white'"
+                   class="cursor-pointer border-2 rounded-xl p-3 transition-all relative">
+                <div x-show="m.recommended" class="absolute -top-2 right-3 px-2 py-0.5 bg-violet-500 text-white text-xs rounded-full font-semibold">Recommended</div>
+                <p class="text-xs font-bold text-slate-800" x-text="m.name"></p>
+                <div class="flex items-center gap-1 mt-1">
+                  <template x-for="n in 5" :key="n">
+                    <span :class="n<=m.quality?'text-amber-400':'text-slate-200'" class="text-xs">★</span>
+                  </template>
+                </div>
+                <div class="flex items-center justify-between mt-2">
+                  <span class="text-xs text-slate-500" x-text="m.price"></span>
+                  <span :class="m.speedColor" class="text-xs font-medium px-1.5 py-0.5 rounded-full" x-text="m.speed"></span>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+      </div>
+
+      <div class="flex justify-between">
+        <button @click="step=1" class="px-5 py-3 text-slate-400 hover:text-slate-600 text-sm">← Back</button>
+        <button @click="startGeneration('t2i2v')"
+                :class="motionPrompt.trim()?'bg-violet-500 hover:bg-violet-600 text-white':'bg-slate-200 text-slate-400 cursor-not-allowed'"
+                class="px-7 py-3 rounded-xl font-semibold text-sm flex items-center gap-2">
+          🎬 Generate Video →
+        </button>
+      </div>
+    </div>
+
+    <!-- T2I2V Step 3 — Video (reuses same layout as I2V) -->
+    <div x-show="mode==='t2i2v' && step===3" class="pt-2">
+      <template x-if="!videoReady">
+        <div class="text-center py-16 space-y-6">
+          <div class="bob inline-block text-5xl">✨</div>
+          <div>
+            <p class="text-xl font-bold text-slate-800" x-text="genMessage||'Generating...'"></p>
+            <p class="text-slate-500 text-sm mt-1">Brief → FLUX image → AI video — sit tight</p>
+          </div>
+          <div class="max-w-xs mx-auto">
+            <div class="bg-slate-200 rounded-full h-2.5 overflow-hidden">
+              <div class="bg-violet-500 h-2.5 rounded-full transition-all duration-700" :style="'width:'+Math.max(5,genProgress)+'%'"></div>
+            </div>
+            <p class="text-xs text-slate-400 mt-2" x-text="genProgress+'%'"></p>
+          </div>
+        </div>
+      </template>
+      <template x-if="videoReady">
+        <div class="text-center space-y-6 py-6">
+          <p class="text-2xl font-bold text-slate-800">Your video is ready! 🎉</p>
+          <video x-show="videoUrl" :src="videoUrl" controls autoplay loop
+                 class="w-full max-w-sm mx-auto rounded-2xl shadow-lg" style="max-height:600px"></video>
+          <div class="flex justify-center gap-3">
+            <a x-show="videoUrl" :href="videoUrl" download="ad-video-t2i2v.mp4" target="_blank"
+               class="px-6 py-3 bg-violet-500 hover:bg-violet-600 text-white rounded-xl font-semibold text-sm">⬇️ Download MP4</a>
+            <button @click="reset()" class="px-6 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-semibold text-sm">🔄 Create Another</button>
+          </div>
+        </div>
+      </template>
+    </div>
+
     <!-- I2V Step 3 — Video -->
     <div x-show="mode==='i2v' && step===3" class="pt-2">
       <template x-if="!videoReady">
@@ -1470,6 +1746,11 @@ function adAgent() {
     motionPrompt: '',
     suggestingMotion: false,
     selectedI2VModel: 'fal-ai/wan/v2.2-a14b/image-to-video',
+
+    // ── T2I2V state ───────────────────────────────
+    t2iImageUrl: null,
+    t2iImagePrompt: '',
+    generatingImage: false,
 
     // ── Model catalogues ─────────────────────────
     t2vModels: [
@@ -1585,21 +1866,59 @@ function adAgent() {
       finally { this.suggestingMotion = false; }
     },
 
+    // ── Shared: suggest motion from any URL ───────
+    async autoSuggestMotionFromUrl(photoUrl) {
+      if (!photoUrl || this.suggestingMotion) return;
+      this.suggestingMotion = true; this.error = null;
+      try {
+        const r = await fetch('/api/suggest-motion', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({photo_url: photoUrl, brand_name: this.brandName, platform: this.platform})
+        });
+        if (!r.ok) { const e=await r.json(); throw new Error(e.detail||'Failed'); }
+        const d = await r.json();
+        this.adConcept    = d.concept      || '';
+        this.motionPrompt = d.motion_prompt || d.concept || '';
+      } catch(e) { this.error = e.message; }
+      finally { this.suggestingMotion = false; }
+    },
+
+    // ── T2I2V: generate image then auto-suggest ───
+    async startT2IGeneration() {
+      if (!this.brief.trim() || this.generatingImage) return;
+      this.generatingImage = true; this.error = null;
+      try {
+        const r = await fetch('/api/generate-image', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({brief: this.brief, brand_name: this.brandName||'the brand', platform: this.platform})
+        });
+        if (!r.ok) { const e=await r.json(); throw new Error(e.detail||'Failed'); }
+        const d = await r.json();
+        this.t2iImageUrl    = d.image_url;
+        this.t2iImagePrompt = d.image_prompt;
+        this.step = 2;
+        // Auto-generate motion prompt from the AI image
+        await this.autoSuggestMotionFromUrl(this.t2iImageUrl);
+      } catch(e) { this.error = e.message; }
+      finally { this.generatingImage = false; }
+    },
+
     // ── Shared: start generation ──────────────────
     async startGeneration(m) {
-      const targetStep = m === 'i2v' ? 3 : 5;
+      const targetStep = m === 'i2v' ? 3 : (m === 't2i2v' ? 3 : 5);
       this.step = targetStep;
       this.genProgress = 5; this.videoReady = false;
       this.genMessage = 'Preparing...'; this.error = null;
       try {
+        const isI2V = m === 'i2v' || m === 't2i2v';
         const body = {
-          mode: m,
-          brief: m === 'i2v' ? this.motionPrompt : this.brief,
-          photo_url: m === 'i2v' ? this.i2vPhotoUrl : this.selectedPhotoUrl,
+          mode: 'i2v',   // t2i2v uses I2V backend with generated image
+          brief: isI2V ? this.motionPrompt : this.brief,
+          photo_url: m === 't2i2v' ? this.t2iImageUrl : (m === 'i2v' ? this.i2vPhotoUrl : this.selectedPhotoUrl),
           storyboard: m === 't2v' ? this.storyboard : null,
-          model_id: m === 'i2v' ? this.selectedI2VModel : this.selectedT2VModel,
+          model_id: isI2V ? this.selectedI2VModel : this.selectedT2VModel,
           duration: this.videoDuration,
-          brand_concept: m === 'i2v' ? this.adConcept : (this.storyboard?.overall_prompt || this.brief),
+          brand_concept: isI2V ? this.adConcept : (this.storyboard?.overall_prompt || this.brief),
           platform: this.platform,
         };
         const r = await fetch('/api/generate', {
@@ -1662,7 +1981,9 @@ function adAgent() {
         selectedT2VModel:'fal-ai/wan/v2.1/t2v-14b', videoDuration:5,
         // i2v
         i2vPhotoUrl:null, adConcept:'', motionPrompt:'', suggestingMotion:false,
-        selectedI2VModel:'fal-ai/wan/v2.1/14b/image-to-video',
+        selectedI2VModel:'fal-ai/wan/v2.2-a14b/image-to-video',
+        // t2i2v
+        t2iImageUrl:null, t2iImagePrompt:'', generatingImage:false,
       });
     },
   };
