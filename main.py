@@ -177,6 +177,7 @@ async def get_public_image_url(photo_url: str) -> str:
 
 def _parse_json(raw: str) -> dict:
     """Robustly extract JSON from Claude's response, handling common formatting issues."""
+    from json_repair import repair_json
     text = raw.strip()
     # Strip markdown code fences
     if "```" in text:
@@ -194,10 +195,18 @@ def _parse_json(raw: str) -> dict:
     end   = text.rfind("}")
     if start != -1 and end != -1 and end > start:
         text = text[start:end+1]
+    # Try strict parse first, fall back to auto-repair
     try:
         return json.loads(text)
-    except json.JSONDecodeError as e:
-        print(f"[JSON parse] failed: {e}\nRaw (first 500): {raw[:500]}")
+    except json.JSONDecodeError:
+        pass
+    try:
+        repaired = repair_json(text, return_objects=True)
+        if isinstance(repaired, dict):
+            return repaired
+        raise ValueError("Repaired JSON is not a dict")
+    except Exception as e:
+        print(f"[JSON parse] failed even after repair: {e}\nRaw (first 500): {raw[:500]}")
         raise ValueError(f"Claude returned invalid JSON: {e}") from e
 
 

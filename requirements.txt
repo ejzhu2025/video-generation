@@ -3,6 +3,7 @@ uvicorn[standard]
 anthropic
 httpx
 fal-client
+json-repair
 python-dotenv
 beautifulsoup4
 python-multipart
