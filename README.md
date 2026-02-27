@@ -2,7 +2,7 @@
 title: Video Generation
 emoji: 🎬
 colorFrom: indigo
-colorTo: sky
+colorTo: blue
 sdk: docker
 pinned: false
 ---
