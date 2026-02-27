@@ -35,8 +35,8 @@ app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 # CONFIG
 # ============================================================
 
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
-FAL_API_KEY       = os.getenv("FAL_API_KEY", "")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
+FAL_API_KEY       = os.getenv("FAL_API_KEY", "").strip()
 FAL_T2V_MODEL     = os.getenv("FAL_T2V_MODEL", "fal-ai/cogvideox-5b")
 FAL_I2V_MODEL     = os.getenv("FAL_I2V_MODEL", "fal-ai/wan/v2.1/1.3b/image-to-video")
 LUMA_API_KEY      = os.getenv("LUMA_API_KEY", "")
