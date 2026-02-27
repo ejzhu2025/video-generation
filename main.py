@@ -15,9 +15,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# fal_client reads FAL_KEY; mirror our FAL_API_KEY into it
+# fal_client reads FAL_KEY; mirror our FAL_API_KEY into it (strip to remove HF Spaces trailing newlines)
 if os.getenv("FAL_API_KEY") and not os.getenv("FAL_KEY"):
-    os.environ["FAL_KEY"] = os.getenv("FAL_API_KEY")
+    os.environ["FAL_KEY"] = os.getenv("FAL_API_KEY").strip()
 
 # ============================================================
 # APP SETUP
