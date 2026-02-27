@@ -64,6 +64,7 @@ class StoryboardRequest(BaseModel):
     platform: str = "instagram_reel"
     photo_url: Optional[str] = None
     brand_name: Optional[str] = None
+    duration: int = 5
 
 class SuggestMotionRequest(BaseModel):
     photo_url: str
@@ -242,13 +243,13 @@ async def analyze_image(photo_url: str) -> str:
 # ============================================================
 
 async def generate_storyboard(brief: str, platform: str,
-                               image_analysis: str = "", brand_name: str = "the brand") -> dict:
+                               image_analysis: str = "", brand_name: str = "the brand", duration: int = 5) -> dict:
     specs = {
-        "instagram_reel": {"ratio":"9:16","duration":5,"name":"Instagram Reel"},
-        "tiktok":         {"ratio":"9:16","duration":5,"name":"TikTok"},
-        "youtube":        {"ratio":"16:9","duration":5,"name":"YouTube Short"},
+        "instagram_reel": {"ratio":"9:16","name":"Instagram Reel"},
+        "tiktok":         {"ratio":"9:16","name":"TikTok"},
+        "youtube":        {"ratio":"16:9","name":"YouTube Short"},
     }
-    spec = specs.get(platform, specs["instagram_reel"])
+    spec = {**specs.get(platform, specs["instagram_reel"]), "duration": duration}
     if not ANTHROPIC_API_KEY:
         return _mock_storyboard(brand_name, spec, image_analysis)
 
@@ -683,7 +684,7 @@ async def upload_photo(file: UploadFile = File(...)):
 async def create_storyboard(req: StoryboardRequest):
     try:
         analysis = await analyze_image(req.photo_url) if req.photo_url else ""
-        result   = await generate_storyboard(req.brief, req.platform, analysis, req.brand_name or "the brand")
+        result   = await generate_storyboard(req.brief, req.platform, analysis, req.brand_name or "the brand", req.duration)
         result["image_analysis"]  = analysis
         if req.photo_url: result["reference_photo"] = req.photo_url
         return result
@@ -1027,6 +1028,20 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           </div>
         </div>
       </div>
+      <!-- Duration selector — before plan generation so Claude writes correct total duration -->
+      <div class="bg-white rounded-2xl shadow-sm border border-slate-200 p-5 space-y-3">
+        <p class="text-xs font-semibold text-slate-500 uppercase tracking-wider">Video Duration</p>
+        <div class="grid grid-cols-2 gap-3">
+          <template x-for="d in [5,10]" :key="d">
+            <div @click="videoDuration=d"
+                 :class="videoDuration===d?'border-indigo-500 bg-indigo-50':'border-slate-200 hover:border-indigo-300 bg-white'"
+                 class="cursor-pointer border-2 rounded-xl p-3 text-center transition-all">
+              <p class="text-sm font-bold text-slate-800" x-text="d+'s'"></p>
+            </div>
+          </template>
+        </div>
+      </div>
+
       <div class="flex justify-between">
         <button @click="step=2" class="px-5 py-3 text-slate-400 hover:text-slate-600 text-sm">← Back</button>
         <button @click="generateStoryboard()" :disabled="!brief.trim()||loading"
@@ -1107,20 +1122,6 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 <span :class="m.speedColor" class="text-xs font-medium px-1.5 py-0.5 rounded-full" x-text="m.speed"></span>
               </div>
               <p class="text-xs text-slate-400 mt-1" x-text="m.desc"></p>
-            </div>
-          </template>
-        </div>
-      </div>
-
-      <!-- T2V Duration selector -->
-      <div class="space-y-2">
-        <p class="text-xs text-slate-400 font-semibold uppercase tracking-wider">Video Duration</p>
-        <div class="grid grid-cols-2 gap-2">
-          <template x-for="d in [5,10]" :key="d">
-            <div @click="videoDuration=d"
-                 :class="videoDuration===d?'border-indigo-500 bg-indigo-50':'border-slate-200 hover:border-indigo-300 bg-white'"
-                 class="cursor-pointer border-2 rounded-xl p-3 text-center transition-all">
-              <p class="text-sm font-bold text-slate-800" x-text="d+'s'"></p>
             </div>
           </template>
         </div>
@@ -1536,7 +1537,8 @@ function adAgent() {
         const r = await fetch('/api/storyboard', {
           method:'POST', headers:{'Content-Type':'application/json'},
           body: JSON.stringify({brief:this.brief, platform:this.platform,
-                                photo_url:this.selectedPhotoUrl, brand_name:this.brandName||'the brand'})
+                                photo_url:this.selectedPhotoUrl, brand_name:this.brandName||'the brand',
+                                duration:this.videoDuration})
         });
         if (!r.ok) { const e=await r.json(); throw new Error(e.detail||'Failed'); }
         this.storyboard = await r.json();
