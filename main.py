@@ -175,6 +175,32 @@ async def get_public_image_url(photo_url: str) -> str:
 # CLAUDE VISION — IMAGE ANALYSIS
 # ============================================================
 
+def _parse_json(raw: str) -> dict:
+    """Robustly extract JSON from Claude's response, handling common formatting issues."""
+    text = raw.strip()
+    # Strip markdown code fences
+    if "```" in text:
+        parts = text.split("```")
+        for part in parts:
+            part = part.strip()
+            if part.startswith("json"):
+                part = part[4:]
+            part = part.strip()
+            if part.startswith("{"):
+                text = part
+                break
+    # Extract outermost { ... } in case Claude added extra prose
+    start = text.find("{")
+    end   = text.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        text = text[start:end+1]
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as e:
+        print(f"[JSON parse] failed: {e}\nRaw (first 500): {raw[:500]}")
+        raise ValueError(f"Claude returned invalid JSON: {e}") from e
+
+
 async def analyze_image(photo_url: str) -> str:
     if not ANTHROPIC_API_KEY:
         return "A professional product photo with clean composition, appealing colors, and clear brand identity."
@@ -248,10 +274,7 @@ Return this exact JSON:
 Generate 3-4 scenes totaling {spec['duration']} seconds."""}],
     )
     raw = msg.content[0].text.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"): raw = raw[4:]
-    return json.loads(raw.strip())
+    return _parse_json(raw)
 
 
 def _mock_storyboard(brand_name: str, spec: dict, image_analysis: str) -> dict:
@@ -325,10 +348,7 @@ Rules for motion_prompt:
 Return JSON only: {{"concept": "...", "motion_prompt": "..."}}"""}],
     )
     raw = msg.content[0].text.strip()
-    if raw.startswith("```"):
-        raw = raw.split("```")[1]
-        if raw.startswith("json"): raw = raw[4:]
-    return json.loads(raw.strip())
+    return _parse_json(raw)
 
 # ============================================================
 # FAL.AI — TEXT TO VIDEO
