@@ -77,6 +77,8 @@ class GenerateRequest(BaseModel):
     duration: int = 5               # video length in seconds (5 or 10)
     photo_url: Optional[str] = None
     model_id: Optional[str] = None      # override env default
+    brand_concept: Optional[str] = None # I2V brand concept for music generation
+    platform: str = "instagram_reel"
 
 # ============================================================
 # URL SCRAPING
@@ -397,6 +399,89 @@ async def _fal_submit(endpoint: str, payload: dict) -> dict:
         return {"request_id": rid, "status_url": status_url, "response_url": response_url}
 
 
+# ── Music generation ────────────────────────────────────────
+
+async def _generate_music_prompt(brand_concept: str, platform: str) -> str:
+    """Ask Claude to write a Stable Audio prompt based on brand concept."""
+    if not ANTHROPIC_API_KEY or not brand_concept:
+        return "uplifting cinematic background music, warm and inviting, no vocals, product advertisement"
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    msg = client.messages.create(
+        model="claude-haiku-4-5-20251001", max_tokens=80,
+        messages=[{"role":"user","content":
+            f"Write a 1-sentence Stable Audio music prompt (max 20 words, no vocals, background music) "
+            f"for a {platform} ad with this brand concept: {brand_concept[:300]}\n"
+            f"Reply with the prompt only, no quotes."}],
+    )
+    return msg.content[0].text.strip()
+
+
+async def generate_music(brand_concept: str, platform: str, duration: int) -> str:
+    """Generate background music via fal.ai Stable Audio. Returns audio URL."""
+    music_prompt = await _generate_music_prompt(brand_concept, platform)
+    seconds = min(47, max(5, duration + 2))   # slightly longer than video, capped at 47s
+    print(f"[music] prompt='{music_prompt}' seconds={seconds}")
+    job = await _fal_submit("fal-ai/stable-audio", {"prompt": music_prompt, "seconds_total": seconds, "steps": 100})
+    for _ in range(60):
+        await asyncio.sleep(3)
+        async with httpx.AsyncClient(timeout=20) as hc:
+            sr = await hc.get(job["status_url"], headers={"Authorization": f"Key {FAL_API_KEY}"})
+            data = sr.json()
+        st = data.get("status", "")
+        if st == "COMPLETED":
+            result = data.get("output") or {}
+            af = result.get("audio_file") or {}
+            url = af.get("url") or result.get("audio_url", "")
+            if url:
+                return url
+            # fetch from response_url
+            async with httpx.AsyncClient(timeout=20) as hc:
+                rr = await hc.get(job["response_url"], headers={"Authorization": f"Key {FAL_API_KEY}"})
+                out = rr.json()
+            af = out.get("audio_file") or {}
+            return af.get("url", "")
+        if st in ("FAILED", "ERROR"):
+            raise RuntimeError(f"Music generation failed: {data.get('error','unknown')}")
+    raise RuntimeError("Music generation timed out")
+
+
+async def merge_video_audio(video_url: str, audio_url: str, job_id: str) -> str:
+    """Download video+audio, merge with ffmpeg, serve merged file. Returns local path."""
+    import subprocess
+    out_dir = UPLOAD_DIR / "merged"
+    out_dir.mkdir(exist_ok=True)
+    vid_path   = out_dir / f"{job_id}_video.mp4"
+    aud_path   = out_dir / f"{job_id}_audio.mp3"
+    merged_path = out_dir / f"{job_id}_merged.mp4"
+
+    async with httpx.AsyncClient(timeout=120, follow_redirects=True) as hc:
+        vr = await hc.get(video_url)
+        vid_path.write_bytes(vr.content)
+        ar = await hc.get(audio_url)
+        aud_path.write_bytes(ar.content)
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(vid_path),
+        "-i", str(aud_path),
+        "-map", "0:v:0",         # video stream from video file
+        "-map", "1:a:0",         # audio stream from music file
+        "-c:v", "copy",          # no re-encode video
+        "-c:a", "aac",
+        "-shortest",             # cut to video length
+        str(merged_path),
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    _, stderr = await proc.communicate()
+    vid_path.unlink(missing_ok=True)
+    aud_path.unlink(missing_ok=True)
+    if proc.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed: {stderr.decode()[-300:]}")
+    return f"/uploads/merged/{job_id}_merged.mp4"
+
+
 async def _start_fal_t2v(prompt: str, model_id: str = "", aspect_ratio: str = "9:16", duration: int = 5) -> dict:
     return await _fal_submit(model_id or FAL_T2V_MODEL, {"prompt": prompt, "aspect_ratio": aspect_ratio, "duration": str(duration)})
 
@@ -522,10 +607,20 @@ async def run_generation_job(
 
             for i in range(120):
                 await asyncio.sleep(5)
-                jobs[job_id]["progress"] = min(12 + i, 88)
+                jobs[job_id]["progress"] = min(12 + i, 75)
                 result = await _poll_fal(fal_job)
                 if result["status"] == "completed":
-                    jobs[job_id].update({"status":"completed","video_url":result["video_url"],
+                    video_url = result["video_url"]
+                    # ── Add background music ──────────────────
+                    brand_concept = jobs[job_id].get("brand_concept", "")
+                    jobs[job_id].update({"message": "Generating background music...", "progress": 80})
+                    try:
+                        audio_url = await generate_music(brand_concept, jobs[job_id].get("platform","instagram_reel"), duration)
+                        jobs[job_id].update({"message": "Mixing music into video...", "progress": 90})
+                        video_url = await merge_video_audio(video_url, audio_url, job_id)
+                    except Exception as e:
+                        print(f"[music] skipped: {e}")  # non-fatal, use original video
+                    jobs[job_id].update({"status":"completed","video_url":video_url,
                                          "message":"Video ready!","progress":100,"mock":False}); return
                 if result["status"] == "failed":
                     jobs[job_id].update({"status":"failed","error":result["error"]}); return
@@ -615,7 +710,9 @@ async def start_generation(req: GenerateRequest, background_tasks: BackgroundTas
 
     job_id = str(uuid.uuid4())
     jobs[job_id] = {"status":"pending","message":"Queued...","progress":0,
-                    "video_url":None,"error":None,"mock":False,"mode":req.mode}
+                    "video_url":None,"error":None,"mock":False,"mode":req.mode,
+                    "brand_concept": req.brand_concept or prompt[:200],
+                    "platform": req.platform}
     background_tasks.add_task(
         run_generation_job, job_id, prompt, ratio, req.photo_url, req.mode, req.model_id or "", req.duration
     )
@@ -1500,6 +1597,8 @@ function adAgent() {
           storyboard: m === 't2v' ? this.storyboard : null,
           model_id: m === 'i2v' ? this.selectedI2VModel : this.selectedT2VModel,
           duration: this.videoDuration,
+          brand_concept: m === 'i2v' ? this.adConcept : (this.storyboard?.overall_prompt || this.brief),
+          platform: this.platform,
         };
         const r = await fetch('/api/generate', {
           method:'POST', headers:{'Content-Type':'application/json'},
