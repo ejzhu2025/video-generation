@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+anthropic
+httpx
+fal-client
+python-dotenv
+beautifulsoup4
+python-multipart

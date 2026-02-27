@@ -1,0 +1,16 @@
+# Environment
+.env
+
+# Uploads (user content, not tracked)
+uploads/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# OS
+.DS_Store
