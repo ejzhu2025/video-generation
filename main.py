@@ -261,8 +261,8 @@ async def generate_storyboard(brief: str, platform: str,
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     msg = client.messages.create(
         model="claude-sonnet-4-6", max_tokens=2000,
-        system="You are a creative director for short-form video ads. Return ONLY valid JSON, no other text.",
-        messages=[{"role":"user","content":f"""Create a {spec['duration']}-second video ad storyboard.
+        system="You are a commercial video director specializing in short-form ad production. Return ONLY valid JSON, no other text.",
+        messages=[{"role":"user","content":f"""Create a {spec['duration']}-second commercial ad storyboard. 要求输出可商业化的广告分镜。
 
 Brand: {brand_name}
 Brief: {brief}
@@ -276,7 +276,7 @@ Return this exact JSON:
   "total_duration": {spec['duration']},
   "platform": "{spec['name']}",
   "ratio": "{spec['ratio']}",
-  "overall_prompt": "Single comprehensive AI video generation prompt for the full {spec['duration']}s video",
+  "overall_prompt": "Time-coded shot script for AI video generation. Format each scene as [MM:SS-MM:SS] followed by a detailed cinematic description (camera movement, lighting, subject action, mood). Example: [0:00-0:02] Slow dolly-in toward product on marble surface, warm golden backlight, shallow depth of field. [0:02-0:04] Close-up rack focus on product detail, soft bokeh background. The full script must cover exactly {spec['duration']} seconds and read as a professional commercial ad shooting script.",
   "scenes": [
     {{"id":1,"start_time":0.0,"end_time":1.5,"duration":1.5,
       "title":"Scene title","description":"What viewer sees and feels",
