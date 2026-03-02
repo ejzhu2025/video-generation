@@ -276,14 +276,9 @@ Return this exact JSON:
   "total_duration": {spec['duration']},
   "platform": "{spec['name']}",
   "ratio": "{spec['ratio']}",
-  "overall_prompt": "Time-coded shot script for AI video generation. Format each scene as [MM:SS-MM:SS] followed by a detailed cinematic description (camera movement, lighting, subject action, mood). Example: [0:00-0:02] Slow dolly-in toward product on marble surface, warm golden backlight, shallow depth of field. [0:02-0:04] Close-up rack focus on product detail, soft bokeh background. The full script must cover exactly {spec['duration']} seconds and read as a professional commercial ad shooting script.",
-  "scenes": [
-    {{"id":1,"start_time":0.0,"end_time":1.5,"duration":1.5,
-      "title":"Scene title","description":"What viewer sees and feels",
-      "visual_prompt":"Detailed visual prompt","camera_note":"Camera movement"}}
-  ]
+  "overall_prompt": "[0:00-0:02] <shot 1: camera movement, lighting, subject action, mood>. [0:02-0:04] <shot 2>. [0:04-0:05] <shot 3>. Each segment must be a precise cinematic instruction covering exactly {spec['duration']} seconds total. Write as a professional commercial ad shooting script."
 }}
-Generate 3-4 scenes totaling {spec['duration']} seconds."""}],
+Generate 3-4 shots totaling exactly {spec['duration']} seconds."""}],
     )
     raw = msg.content[0].text.strip()
     return _parse_json(raw)
@@ -295,25 +290,7 @@ def _mock_storyboard(brand_name: str, spec: dict, image_analysis: str) -> dict:
         "detected_style": "Warm & inviting with natural product focus",
         "style_reasoning": "Detected from product photo: clean lighting, warm tones, lifestyle composition.",
         "total_duration": spec["duration"], "platform": spec["name"], "ratio": spec["ratio"],
-        "overall_prompt": f"Cinematic product ad for {brand_name}. Hero product in warm light, slow reveal, brand identity fade-in.",
-        "scenes": [
-            {"id":1,"start_time":0.0,"end_time":1.5,"duration":1.5,"title":"Hero Reveal",
-             "description":"Product placed center frame with dramatic lighting.",
-             "visual_prompt":f"Hero product shot for {brand_name}, cinematic lighting, slow reveal",
-             "camera_note":"Slow push-in"},
-            {"id":2,"start_time":1.5,"end_time":3.0,"duration":1.5,"title":"Detail Close-up",
-             "description":"Macro close-up highlighting textures and quality.",
-             "visual_prompt":"Macro product texture, bokeh background, warm light, premium feel",
-             "camera_note":"Rack focus from background to product"},
-            {"id":3,"start_time":3.0,"end_time":4.5,"duration":1.5,"title":"Lifestyle",
-             "description":"Product in real-world context, aspirational.",
-             "visual_prompt":"Lifestyle shot, golden hour, natural setting, brand colors",
-             "camera_note":"Medium shot, gentle pan"},
-            {"id":4,"start_time":4.5,"end_time":5.0,"duration":0.5,"title":"Brand End Card",
-             "description":"Brand identity fades in.",
-             "visual_prompt":"Brand logo on warm bokeh, elegant fade",
-             "camera_note":"Static, fade in"},
-        ],
+        "overall_prompt": f"[0:00-0:02] Slow dolly-in toward {brand_name} product on marble surface, warm golden backlight, shallow depth of field. [0:02-0:04] Close-up rack focus on product detail, soft bokeh background, premium lighting. [0:04-0:05] Brand name fades in centered on clean background, elegant and aspirational.",
         "_mock": True,
     }
 
@@ -1079,30 +1056,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           </div>
         </div>
       </div>
-      <!-- Overall prompt -->
-      <div class="bg-slate-50 rounded-xl p-4 border border-slate-200">
-        <p class="text-xs text-slate-400 font-semibold uppercase tracking-wider mb-2">Video Generation Prompt</p>
-        <p class="text-sm text-slate-600 italic leading-relaxed" x-text="storyboard&&storyboard.overall_prompt"></p>
-      </div>
-      <!-- Scenes -->
+      <!-- Shot Script -->
       <div class="space-y-3">
-        <p class="text-xs text-slate-400 font-semibold uppercase tracking-wider">Scenes</p>
-        <template x-for="scene in (storyboard?storyboard.scenes:[])" :key="scene.id">
-          <div class="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden scene-bar">
-            <div class="p-5">
-              <div class="flex items-center justify-between mb-3">
-                <div class="flex items-center gap-3">
-                  <span class="w-7 h-7 bg-indigo-500 text-white rounded-full flex items-center justify-center text-xs font-bold" x-text="scene.id"></span>
-                  <h3 class="font-semibold text-slate-800 text-sm" x-text="scene.title"></h3>
-                </div>
-                <span class="text-xs text-slate-400 bg-slate-100 px-2 py-1 rounded-full font-mono" x-text="scene.start_time+'s – '+scene.end_time+'s'"></span>
-              </div>
-              <p class="text-slate-600 text-sm leading-relaxed" x-text="scene.description"></p>
-              <div class="flex items-start gap-2 mt-3 pt-3 border-t border-slate-100">
-                <span class="text-slate-300 text-xs">🎥</span>
-                <p class="text-slate-400 text-xs italic" x-text="scene.camera_note"></p>
-              </div>
+        <p class="text-xs text-slate-400 font-semibold uppercase tracking-wider">Shot Script</p>
+        <template x-for="(shot, i) in shotSegments()" :key="i">
+          <div class="bg-white rounded-xl border border-slate-200 shadow-sm p-4 flex gap-4 items-start">
+            <div class="flex-shrink-0 flex flex-col items-center gap-1">
+              <span class="w-7 h-7 bg-indigo-500 text-white rounded-full flex items-center justify-center text-xs font-bold" x-text="i+1"></span>
+              <span class="text-xs font-mono text-indigo-400 whitespace-nowrap" x-text="shot.time"></span>
             </div>
+            <p class="text-sm text-slate-700 leading-relaxed" x-text="shot.desc"></p>
           </div>
         </template>
       </div>
@@ -1492,6 +1455,13 @@ function adAgent() {
       this.mode = m;
       this.step = 1;
       this.error = null;
+    },
+
+    // ── Parse time-coded shot script into segments ─
+    shotSegments() {
+      const raw = this.storyboard?.overall_prompt || '';
+      const matches = [...raw.matchAll(/\[(\d+:\d+[-–]\d+:\d+)\]\s*([^\[]+)/g)];
+      return matches.map(m => ({ time: m[1], desc: m[2].replace(/\.\s*$/, '').trim() }));
     },
 
     // ── T2V: scrape brand page ────────────────────
