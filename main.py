@@ -37,7 +37,7 @@ app.mount("/uploads", StaticFiles(directory=str(UPLOAD_DIR)), name="uploads")
 
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 FAL_API_KEY       = os.getenv("FAL_API_KEY", "").strip()
-FAL_T2V_MODEL     = os.getenv("FAL_T2V_MODEL", "fal-ai/cogvideox-5b")
+FAL_T2V_MODEL     = os.getenv("FAL_T2V_MODEL", "fal-ai/wan-t2v")
 FAL_I2V_MODEL     = os.getenv("FAL_I2V_MODEL", "fal-ai/wan/v2.1/1.3b/image-to-video")
 LUMA_API_KEY      = os.getenv("LUMA_API_KEY", "")
 VIDEO_BACKEND     = os.getenv("VIDEO_BACKEND", "mock")   # fal | luma | mock
@@ -484,7 +484,15 @@ async def merge_video_audio(video_url: str, audio_url: str, job_id: str) -> str:
 
 
 async def _start_fal_t2v(prompt: str, model_id: str = "", aspect_ratio: str = "9:16", duration: int = 5) -> dict:
-    return await _fal_submit(model_id or FAL_T2V_MODEL, {"prompt": prompt, "aspect_ratio": aspect_ratio, "duration": str(duration)})
+    fps = 16
+    num_frames = max(81, duration * fps)
+    return await _fal_submit(model_id or FAL_T2V_MODEL, {
+        "prompt": prompt,
+        "aspect_ratio": aspect_ratio,
+        "num_frames": num_frames,
+        "frames_per_second": fps,
+        "resolution": "720p",
+    })
 
 
 def _i2v_payload(prompt: str, image_url: str, model_id: str, duration: int) -> dict:
@@ -1457,7 +1465,7 @@ function adAgent() {
     brief: '',
     storyboard: null,
     loading: false,
-    selectedT2VModel: 'fal-ai/wan/v2.1/t2v-14b',
+    selectedT2VModel: 'fal-ai/wan-t2v',
     videoDuration: 5,
 
     // ── I2V state ────────────────────────────────
@@ -1469,7 +1477,7 @@ function adAgent() {
 
     // ── Model catalogues ─────────────────────────
     t2vModels: [
-      { id: 'fal-ai/wan/v2.1/t2v-14b',                     name: 'Wan 2.1 T2V 14B',  quality: 4, price: '~$0.05/video', speed: 'Medium', speedColor: 'text-blue-600 bg-blue-50',    desc: 'Balanced quality & cost',  recommended: true  },
+      { id: 'fal-ai/wan-t2v',                     name: 'Wan 2.1 T2V 14B',  quality: 4, price: '~$0.05/video', speed: 'Medium', speedColor: 'text-blue-600 bg-blue-50',    desc: 'Balanced quality & cost',  recommended: true  },
       { id: 'fal-ai/kling-video/v1.6/pro/text-to-video',   name: 'Kling 1.6 Pro',    quality: 5, price: '~$0.14/video', speed: 'Slow',   speedColor: 'text-purple-600 bg-purple-50', desc: 'Best commercial quality',  recommended: false },
       { id: 'fal-ai/minimax/video-01',                     name: 'MiniMax Video-01',  quality: 4, price: '~$0.10/video', speed: 'Medium', speedColor: 'text-orange-600 bg-orange-50', desc: 'High fidelity motion',     recommended: false },
     ],
@@ -1656,7 +1664,7 @@ function adAgent() {
         // t2v
         pageUrl:'', brandInfo:null, scraping:false,
         allPhotos:[], selectedPhotoUrl:null, uploading:false, brief:'', storyboard:null, loading:false,
-        selectedT2VModel:'fal-ai/wan/v2.1/t2v-14b', videoDuration:5,
+        selectedT2VModel:'fal-ai/wan-t2v', videoDuration:5,
         // i2v
         i2vPhotoUrl:null, adConcept:'', motionPrompt:'', suggestingMotion:false,
         selectedI2VModel:'fal-ai/wan/v2.2-a14b/image-to-video',
